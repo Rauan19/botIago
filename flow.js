@@ -105,33 +105,13 @@ async function handleFilter(phone, text) {
   return sendVehicleList(phone);
 }
 
-/** Lista veículos: até 3 = botões com nome do carro; 4+ = lista com nomes na frente */
+/** Lista veículos: sempre usa lista grande de opções (sendMenu) para melhor visualização */
 async function sendVehicleList(phone) {
   await ensureLoaded();
   const s = get(phone);
   const { items, hasMore, page } = getByFilter(s.current_filter, s.current_page);
   const listIds = items.map((v) => v.id);
   set(phone, { list_ids: listIds });
-
-  if (items.length <= 3) {
-    const choices = items.map((v) => `${v.nome} – ${v.precoFormatado}|veh:${v.id}`);
-    if (hasMore) choices.push('Ver mais opções|mais');
-    choices.push('Falar com vendedor|vendedor');
-    choices.push('Voltar ao menu principal|menu');
-    await sendMessage(phone, `Encontrei ${items.length} opção(ões) para você (sem fotos):`);
-    await sendButtons(phone, {
-      text: 'Escolha o carro (toque no nome):',
-      footerText: `Página ${page}`,
-      choices: choices.slice(0, 3),
-    });
-    if (choices.length > 3) {
-      await sendButtons(phone, {
-        text: 'Mais opções:',
-        choices: choices.slice(3, 6),
-      });
-    }
-    return;
-  }
 
   const choices = items.map((v) => `${v.nome} – ${v.precoFormatado}|veh:${v.id}|`);
   if (hasMore) choices.push('Ver mais opções|mais|');
