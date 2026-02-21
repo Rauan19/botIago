@@ -25,7 +25,8 @@ async function sendWelcome(phone) {
   set(phone, { stage: stages.MENU });
   await sendMessage(
     phone,
-    'Olá! 👋 Seja muito bem-vindo à Iago Veículos!\n\n' +
+    '*IAGO VEÍCULOS*\n\n' +
+    '*Olá! Seja muito bem-vindo à Iago Veículos!*\n\n' +
     'É um prazer ter você aqui. Vamos encontrar o carro perfeito pra você?'
   );
   await sendMenu(phone, {
@@ -118,7 +119,7 @@ async function sendVehicleList(phone) {
   choices.push('Falar com vendedor|vendedor|');
   choices.push('Voltar ao menu principal|menu|');
 
-  await sendMessage(phone, 'Encontrei essas opções para você (sem fotos):');
+  await sendMessage(phone, 'Encontrei essas opções para você:');
   await sendMenu(phone, {
     text: 'Escolha o carro (nomes na lista):',
     footerText: `Página ${page}`,

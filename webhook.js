@@ -5,6 +5,60 @@
 
 const { processMessage, sendWelcome } = require('./flow');
 
+// Map para deduplicar webhooks (messageId -> timestamp)
+const recentMsgIds = new Map();
+const DUP_TTL_MS = 60 * 1000; // 60s
+
+function extractMessageId(body) {
+  if (!body || typeof body !== 'object') return null;
+  // Possíveis campos que podem trazer um id único da mensagem (varia por instância)
+  const candidates = [
+    body?.key?.id,
+    body?.message?.id,
+    body?.message?.key?.id,
+    body?.message?.stanzaId,
+    body?.message?.msgId,
+    body?.message?.messageId,
+    body?.data?.id,
+    body?.data?.messageId,
+    body?.id,
+    body?.messageId,
+  ];
+  for (const c of candidates) {
+    if (!c) continue;
+    const s = String(c).trim();
+    if (s) return s;
+  }
+  return null;
+}
+
+function isDuplicate(body, parsed = {}) {
+  const now = Date.now();
+
+  // Prefer message id if disponível
+  const id = extractMessageId(body);
+  if (id) {
+    const prev = recentMsgIds.get(id);
+    if (prev && now - prev < DUP_TTL_MS) return true;
+    recentMsgIds.set(id, now);
+  } else {
+    // fallback: fingerprint por phone+texto+janela temporal (5s)
+    const phone = parsed.phone || '';
+    const text = (parsed.text || '').slice(0, 200);
+    const bucket = Math.floor(now / 5000);
+    const sig = `sig:${phone}|${text}|${bucket}`;
+    const prev = recentMsgIds.get(sig);
+    if (prev && now - prev < DUP_TTL_MS) return true;
+    recentMsgIds.set(sig, now);
+  }
+
+  // limpeza simples: remove ids muito antigos
+  for (const [k, ts] of recentMsgIds) {
+    if (now - ts > DUP_TTL_MS * 5) recentMsgIds.delete(k);
+  }
+  return false;
+}
+
 /** Só retorna número se for só dígitos e 10+ (evita usar chat.id tipo "raf896f47773c63") */
 function normalizarPhone(val) {
   if (val === undefined || val === null) return null;
@@ -174,8 +228,14 @@ async function handleWebhook(req, res) {
     res.status(200).send('ok');
     return;
   }
-
+ 
+  // Parse early (usado para deduplicação por fallback de fingerprint)
   let parsed = parseWebhookBody(body);
+
+  // Deduplicação: ignora reenvios do mesmo webhook (mesmo message id ou fingerprint)
+  if (isDuplicate(body, parsed)) {
+    return res.status(200).send('ok');
+  }
   if (!parsed?.phone) {
     const phoneFallback = extrairPhone(body);
     const textFallback = extrairTexto(body);
