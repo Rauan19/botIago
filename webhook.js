@@ -7,7 +7,8 @@ const { processMessage, sendWelcome } = require('./flow');
 
 // Map para deduplicar webhooks (messageId -> timestamp)
 const recentMsgIds = new Map();
-const DUP_TTL_MS = 60 * 1000; // 60s
+// TTL de deduplicação em ms. Pode ser sobrescrito pela variável DEDUPE_TTL_MS (ex.: 300000 = 5min)
+const DUP_TTL_MS = Number(process.env.DEDUPE_TTL_MS) || (5 * 60 * 1000); // default 5 minutos
 
 function extractMessageId(body) {
   if (!body || typeof body !== 'object') return null;
@@ -57,6 +58,43 @@ function isDuplicate(body, parsed = {}) {
     if (now - ts > DUP_TTL_MS * 5) recentMsgIds.delete(k);
   }
   return false;
+}
+
+// In-memory per-phone queue (single instance only)
+const phoneQueues = new Map();
+
+function enqueuePhoneTask(phone, task) {
+  const key = String(phone).replace(/\D/g, '');
+  const q = phoneQueues.get(key) || [];
+  q.push(task);
+  phoneQueues.set(key, q);
+  if (q.length === 1) {
+    // start processing
+    processNextPhone(key).catch(() => { /* swallow */ });
+  }
+}
+
+async function processNextPhone(key) {
+  const q = phoneQueues.get(key) || [];
+  if (!q || q.length === 0) {
+    phoneQueues.delete(key);
+    return;
+  }
+  const task = q[0];
+  try {
+    await task();
+  } catch (err) {
+    // Em produção evitar logs verbosos; log mínimo para erro inesperado.
+    try { console.error('[Webhook] erro no processamento da fila:', err && err.message ? err.message : err); } catch (_) {}
+  } finally {
+    q.shift();
+    if (q.length === 0) {
+      phoneQueues.delete(key);
+      return;
+    }
+    // próxima tarefa
+    setImmediate(() => processNextPhone(key));
+  }
 }
 
 /** Só retorna número se for só dígitos e 10+ (evita usar chat.id tipo "raf896f47773c63") */
@@ -252,11 +290,17 @@ async function handleWebhook(req, res) {
   }
 
   const { phone, text, isAudio } = parsed;
+  // Ignora mensagens vindas de números internos/configurados (ex.: números da loja)
+  const ignoreEnv = process.env.IGNORE_NUMBERS || '';
+  const ignorePhones = ignoreEnv.split(',').map((p) => String(p || '').replace(/\D/g, '')).filter(Boolean);
+  if (ignorePhones.includes(String(phone).replace(/\D/g, ''))) {
+    return res.status(200).send('ok');
+  }
 
-  // Responde 200 logo para evitar 502 (timeout do proxy/Uazapi). Processa em segundo plano.
+  // Responde 200 logo para evitar 502 (timeout do proxy/Uazapi). Enfileira o processamento por telefone.
   res.status(200).send('ok');
 
-  setImmediate(async () => {
+  enqueuePhoneTask(phone, async () => {
     try {
       const mensagemVazia = text === '' && !isAudio;
       const ehSaudacao = contemSaudacao(text);
@@ -266,7 +310,6 @@ async function handleWebhook(req, res) {
         await processMessage(phone, text, isAudio, !!parsed.isInteractive);
       }
     } catch (err) {
-      console.error('Erro ao processar mensagem:', err);
       try {
         const { sendMessage } = require('./uazapi');
         await sendMessage(phone, 'Desculpe, ocorreu um erro. Por favor, tente de novo ou digite *menu*.');
