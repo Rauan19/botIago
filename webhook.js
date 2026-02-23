@@ -135,6 +135,22 @@ function isGroupOrStatus(body) {
   return false;
 }
 
+/** Detecta se a mensagem é saída/enviada pela própria instância (evitar loop) */
+function isOutgoingMessage(body) {
+  try {
+    const msg = body?.message ?? body?.data?.message ?? body?.chat?.lastMessage ?? body;
+    if (!msg || typeof msg !== 'object') return false;
+    if (msg?.fromMe === true) return true;
+    if (msg?.key?.fromMe === true) return true;
+    if (body?.fromMe === true) return true;
+    if (body?.self === true || String(body?.self).toLowerCase() === 'outgoing') return true;
+    // Alguns providers usam flags diferentes
+    if (msg?.direction && String(msg.direction).toLowerCase() === 'outgoing') return true;
+    if (msg?.status && String(msg.status).toLowerCase() === 'sent') return true;
+  } catch (_) {}
+  return false;
+}
+
 /**
  * Extrai do body (Uazapi: EventType, chat, message/data).
  * Suporta chat.remoteJid, chat.phone, message.from, data.from, etc.
@@ -267,6 +283,11 @@ async function handleWebhook(req, res) {
     return;
   }
  
+  // Ignora mensagens enviadas pela própria instância (evitar loop)
+  if (isOutgoingMessage(body)) {
+    return res.status(200).send('ok');
+  }
+
   // Parse early (usado para deduplicação por fallback de fingerprint)
   let parsed = parseWebhookBody(body);
 
