@@ -11,6 +11,8 @@ const MENU_BASE_URL = process.env.UAZAPI_MENU_URL || BASE_URL;
 const INSTANCE_TOKEN = process.env.UAZAPI_INSTANCE_TOKEN || '';
 const SEND_TEXT_PATH = process.env.UAZAPI_SEND_TEXT_PATH || '/send/text';
 const SEND_IMAGE_PATH = process.env.UAZAPI_SEND_IMAGE_PATH || '';
+const { setLast } = require('./lastOutgoing');
+const sentMessages = require('./sentMessages');
 
 async function sendRequest(path, body, method = 'POST', baseUrl = BASE_URL, opts = {}) {
   const url = `${(baseUrl || BASE_URL).replace(/\/$/, '')}${path}`;
@@ -38,7 +40,22 @@ async function sendRequest(path, body, method = 'POST', baseUrl = BASE_URL, opts
   const contentType = res.headers.get('content-type');
   if (contentType && contentType.includes('application/json')) {
     try {
-      return JSON.parse(responseText);
+      const parsed = JSON.parse(responseText);
+      // Se a resposta da API trouxer um id de mensagem, registra para evitar eco
+      try {
+        const possibleIds = [
+          parsed?.id,
+          parsed?.messageId,
+          parsed?.msgId,
+          parsed?.message?.id,
+          parsed?.data?.id,
+          parsed?.data?.messageId,
+        ].filter(Boolean);
+        for (const pid of possibleIds) {
+          sentMessages.add(pid);
+        }
+      } catch (_) {}
+      return parsed;
     } catch (_) {
       return responseText;
     }
@@ -62,7 +79,9 @@ async function sendMessage(phone, message) {
   let lastErr;
   for (const { path, body } of pathsToTry) {
     try {
-      return await sendRequest(path, body, 'POST', BASE_URL);
+      const res = await sendRequest(path, body, 'POST', BASE_URL);
+      try { setLast(number, text); } catch (_) {}
+      return res;
     } catch (err) {
       lastErr = err;
       if (err.message && err.message.includes('405')) continue;
@@ -93,7 +112,9 @@ async function sendImage(phone, imageUrl, caption = '') {
   }
 
   try {
-    return await sendRequest(path, bodyImage, 'POST', BASE_URL, { silent: true });
+    const res = await sendRequest(path, bodyImage, 'POST', BASE_URL, { silent: true });
+    try { setLast(number, String(imageUrl || 'image')); } catch (_) {}
+    return res;
   } catch (err) {
     return;
   }

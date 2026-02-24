@@ -4,6 +4,19 @@
  */
 
 const { processMessage, sendWelcome } = require('./flow');
+const fs = require('fs');
+const path = require('path');
+const rules = require('./webhook-rules');
+const sentMessages = require('./sentMessages');
+
+function normalizeCandidateNumber(v) {
+  if (!v && v !== 0) return null;
+  try {
+    return String(v).replace(/@.*$/, '').replace(/\D/g, '');
+  } catch (_) {
+    return null;
+  }
+}
 
 // Map para deduplicar webhooks (messageId -> timestamp)
 const recentMsgIds = new Map();
@@ -140,13 +153,56 @@ function isOutgoingMessage(body) {
   try {
     const msg = body?.message ?? body?.data?.message ?? body?.chat?.lastMessage ?? body;
     if (!msg || typeof msg !== 'object') return false;
+
+    // Flags explícitas (de vários providers)
     if (msg?.fromMe === true) return true;
     if (msg?.key?.fromMe === true) return true;
     if (body?.fromMe === true) return true;
     if (body?.self === true || String(body?.self).toLowerCase() === 'outgoing') return true;
-    // Alguns providers usam flags diferentes
     if (msg?.direction && String(msg.direction).toLowerCase() === 'outgoing') return true;
     if (msg?.status && String(msg.status).toLowerCase() === 'sent') return true;
+
+    // Comparar contra IGNORE_NUMBERS (vários campos possíveis)
+    const ignoreEnv = process.env.IGNORE_NUMBERS || '';
+    const ignorePhones = ignoreEnv.split(',').map((p) => String(p || '').replace(/\D/g, '')).filter(Boolean);
+    if (ignorePhones.length > 0) {
+      const candidates = [
+        body?.phone,
+        body?.number,
+        body?.from,
+        body?.sender,
+        body?.remoteJid,
+        body?.chat?.remoteJid,
+        body?.chat?.phone,
+        body?.chat?.number,
+        body?.data?.phone,
+        body?.data?.number,
+        body?.data?.from,
+        body?.data?.sender,
+        body?.data?.remoteJid,
+        body?.message?.from,
+        body?.message?.sender,
+        body?.chat?.lastMessage?.from,
+        body?.contact?.waid,
+        body?.key?.remoteJid,
+        msg?.author,
+        msg?.key?.participant,
+      ];
+      for (const c of candidates) {
+        const n = normalizeCandidateNumber(c);
+        if (!n) continue;
+        if (ignorePhones.includes(n)) {
+          // grava para análise futura
+          try {
+            const logsDir = path.join(__dirname, 'logs');
+            if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+            const entry = { ts: Date.now(), reason: 'ignore_match', candidate: c, normalized: n, sourceKeys: Object.keys(body || {}) };
+            fs.appendFileSync(path.join(logsDir, 'outgoing-ignored.jsonl'), JSON.stringify(entry) + '\n');
+          } catch (_) {}
+          return true;
+        }
+      }
+    }
   } catch (_) {}
   return false;
 }
@@ -277,22 +333,51 @@ async function handleWebhook(req, res) {
 
   const body = typeof req.body === 'object' ? req.body : {};
 
-   // Ignora mensagens de grupos e de status/story
-  if (isGroupOrStatus(body)) {
+  // Ignora mensagens de grupos e de status/story
+ if (rules.isGroupOrStatus(body)) {
     res.status(200).send('ok');
     return;
   }
  
   // Ignora mensagens enviadas pela própria instância (evitar loop)
-  if (isOutgoingMessage(body)) {
+  if (rules.isOutgoingMessage(body)) {
     return res.status(200).send('ok');
   }
+
+  // Proteção extra (brute-force): se o payload contiver qualquer número da lista IGNORE_NUMBERS, ignora.
+  try {
+    const ignoreEnv = process.env.IGNORE_NUMBERS || '';
+    const ignorePhones = ignoreEnv.split(',').map((p) => String(p || '').replace(/\D/g, '')).filter(Boolean);
+    if (ignorePhones.length > 0) {
+      const bodyStr = JSON.stringify(body || {});
+      for (const ip of ignorePhones) {
+        if (!ip) continue;
+        if (bodyStr.includes(ip)) {
+          try {
+            const logsDir = path.join(__dirname, 'logs');
+            if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+            const entry = { ts: Date.now(), reason: 'bruteforce_ignore', matched: ip };
+            fs.appendFileSync(path.join(logsDir, 'outgoing-ignored.jsonl'), JSON.stringify(entry) + '\n');
+          } catch (_) {}
+          return res.status(200).send('ok');
+        }
+      }
+    }
+  } catch (_) {}
 
   // Parse early (usado para deduplicação por fallback de fingerprint)
   let parsed = parseWebhookBody(body);
 
+  // Se a API retornou recentemente um id dessa mensagem (foi enviada por nós), ignorar
+  try {
+    const midCheck = rules.extractMessageId(body);
+    if (midCheck && sentMessages.has(midCheck)) {
+      return res.status(200).send('ok');
+    }
+  } catch (_) {}
+
   // Deduplicação: ignora reenvios do mesmo webhook (mesmo message id ou fingerprint)
-  if (isDuplicate(body, parsed)) {
+  if (rules.isDuplicate(body, parsed.phone, parsed.text)) {
     return res.status(200).send('ok');
   }
   if (!parsed?.phone) {
@@ -311,6 +396,23 @@ async function handleWebhook(req, res) {
   }
 
   const { phone, text, isAudio } = parsed;
+  // Detecta eco: compara com último envio feito pelo bot para esse telefone
+  try {
+    const { getLast } = require('./lastOutgoing');
+    const last = getLast(phone);
+    if (last && typeof text === 'string' && text.trim() !== '' && last.text && String(last.text).trim() !== '' ) {
+      const now = Date.now();
+      const age = now - last.ts;
+      // Se o texto recebido for igual ao último enviado pelo bot (ou contiver), e within 8s, ignorar
+      if (age <= 8000) {
+        const incoming = String(text || '').trim();
+        const sent = String(last.text || '').trim();
+        if (incoming === sent || incoming.includes(sent) || sent.includes(incoming)) {
+          return res.status(200).send('ok');
+        }
+      }
+    }
+  } catch (_) {}
   // Ignora mensagens vindas de números internos/configurados (ex.: números da loja)
   const ignoreEnv = process.env.IGNORE_NUMBERS || '';
   const ignorePhones = ignoreEnv.split(',').map((p) => String(p || '').replace(/\D/g, '')).filter(Boolean);
