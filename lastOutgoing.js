@@ -4,7 +4,7 @@
  * Single-instance only — suficiente para uma única instância em produção.
  */
 const LAST_MAP = new Map();
-const DEFAULT_TTL_MS = 10 * 1000; // 10s por padrão
+const DEFAULT_TTL_MS = Number(process.env.ECHO_TTL_MS) || (30 * 1000);
 
 function setLast(phone, text, ttlMs = DEFAULT_TTL_MS) {
   try {

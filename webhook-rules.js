@@ -10,7 +10,7 @@ const IGNORE_NUMBERS = (process.env.IGNORE_NUMBERS || '')
   .map(p => String(p || '').replace(/\D/g, ''))
   .filter(Boolean);
 
-const DUP_TTL_MS = Number(process.env.DEDUPE_TTL_MS) || 30000;
+const DUP_TTL_MS = Number(process.env.DEDUPE_TTL_MS) || (5 * 60 * 1000);
 const recentMsgIds = new Map();
 
 function extractMessageId(body) {
@@ -94,7 +94,7 @@ function isDuplicate(body, parsedPhone = '', parsedText = '') {
     recentMsgIds.set(mid, now);
     return false;
   }
-  const sig = `sig:${String(parsedPhone||'')}|${String(parsedText||'').slice(0,200)}|${Math.floor(now/5000)}`;
+  const sig = `sig:${String(parsedPhone||'')}|${String(parsedText||'').slice(0,200)}|${Math.floor(now/60000)}`;
   const prev = recentMsgIds.get(sig);
   if (prev && now - prev < DUP_TTL_MS) return true;
   recentMsgIds.set(sig, now);

@@ -6,7 +6,40 @@
 
 const { getByFilter, getById, FILTERS, ensureLoaded } = require('./vehicles');
 const { sendMessage, sendImage, sendMenu, sendButtons } = require('./uazapi');
-const { get, set, stages } = require('./state');
+const {
+  get,
+  set,
+  stages,
+  touch,
+  expireIfNeeded,
+  wantsExplicitRestart,
+  isHumanHandoffActive,
+  isActiveFlowStage,
+} = require('./state');
+
+const SAUDACOES = [
+  /\boi\b/i,
+  /\bol[aá]\b/i,
+  /\bbom\s*dia\b/i,
+  /\boa\s*tarde\b/i,
+  /\boa\s*noite\b/i,
+  /\bboa\s*tarde\b/i,
+  /\bboa\s*noite\b/i,
+  /\bfala\b/i,
+  /\be\s*a[ií]\b/i,
+  /\beai\b/i,
+  /\bsalve\b/i,
+  /\btudo\s*bem\b/i,
+  /\btd\s*bem\b/i,
+  /\bcomo\s*vai\b/i,
+];
+
+function contemSaudacao(texto) {
+  if (!texto || typeof texto !== 'string') return false;
+  const t = texto.trim();
+  if (t === '') return false;
+  return SAUDACOES.some((re) => re.test(t));
+}
 
 const ENDERECO_LOJA = 'Av. Getúlio Vargas\nCruz das Almas - BA, 44380-000';
 const HORARIO_LOJA = 'Seg - Sáb: 8h às 18h';
@@ -67,8 +100,7 @@ async function handleMenu(phone, text) {
   if (opt === '4') return transferToHuman(phone);
   if (opt === '5') return sendAddress(phone);
 
-  await sendMessage(phone, 'Opção não encontrada. Toque em *Ver opções* ou digite 1, 2, 3, 4 ou 5.');
-  return sendWelcome(phone);
+  await sendMessage(phone, 'Opção não encontrada. Toque em *Ver opções* ou digite *menu* para recomeçar.');
 }
 
 /** Pergunta tipo de carro (filtro) */
@@ -234,7 +266,7 @@ async function handleTrade(phone, text) {
 }
 
 async function transferToHuman(phone) {
-  set(phone, { stage: stages.TRANSFER });
+  set(phone, { stage: stages.TRANSFER, transferredAt: Date.now() });
   await sendMessage(phone, 'Perfeito! Vou te encaminhar para um de nossos vendedores. Só um momento.');
 }
 
@@ -269,10 +301,15 @@ function shouldTransferToHuman(text, isAudio) {
  * @param {boolean} isAudio
  */
 async function processMessage(phone, text, isAudio = false, isInteractive = false) {
+  touch(phone);
   const s = get(phone);
 
+  if (isHumanHandoffActive(phone)) {
+    if (wantsExplicitRestart(text)) return sendWelcome(phone);
+    return;
+  }
+
   // Travado: só responde quando o cliente está clicando no menu/lista/botões
-  // (exceto saudação/primeiro contato, que é tratado no webhook)
   if (!isInteractive) return;
 
   if (shouldTransferToHuman(text, isAudio)) {
@@ -294,15 +331,45 @@ async function processMessage(phone, text, isAudio = false, isInteractive = fals
     case stages.TRADE:
       return handleTrade(phone, text);
     case stages.TRANSFER:
-      return sendWelcome(phone);
+      if (wantsExplicitRestart(text)) return sendWelcome(phone);
+      return;
     default:
       return sendWelcome(phone);
   }
 }
 
+/**
+ * Ponto único de entrada do webhook: expira sessão antiga, respeita handoff humano,
+ * evita reiniciar o fluxo só por "oi" no meio da conversa.
+ */
+async function handleIncomingMessage(phone, text, isAudio = false, isInteractive = false) {
+  const sessionExpired = expireIfNeeded(phone);
+  touch(phone);
+
+  if (wantsExplicitRestart(text)) return sendWelcome(phone);
+
+  if (isHumanHandoffActive(phone)) return;
+
+  const mensagemVazia = (text || '') === '' && !isAudio;
+  const ehSaudacao = contemSaudacao(text);
+
+  if (mensagemVazia || ehSaudacao) {
+    const s = get(phone);
+    // Saudação casual no meio do fluxo (ex.: "oi" enquanto escolhe carro) → não manda menu de novo
+    if (ehSaudacao && !wantsExplicitRestart(text) && !sessionExpired && isActiveFlowStage(s.stage)) {
+      return;
+    }
+    return sendWelcome(phone);
+  }
+
+  return processMessage(phone, text, isAudio, isInteractive);
+}
+
 module.exports = {
   sendWelcome,
   processMessage,
+  handleIncomingMessage,
   transferToHuman,
   shouldTransferToHuman,
+  contemSaudacao,
 };

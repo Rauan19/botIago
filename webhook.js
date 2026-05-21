@@ -3,7 +3,8 @@
  * Extrai phone, texto e se é áudio; chama o fluxo do bot.
  */
 
-const { processMessage, sendWelcome } = require('./flow');
+const { handleIncomingMessage } = require('./flow');
+const ECHO_TTL_MS = Number(process.env.ECHO_TTL_MS) || (30 * 1000);
 const fs = require('fs');
 const path = require('path');
 const rules = require('./webhook-rules');
@@ -403,8 +404,7 @@ async function handleWebhook(req, res) {
     if (last && typeof text === 'string' && text.trim() !== '' && last.text && String(last.text).trim() !== '' ) {
       const now = Date.now();
       const age = now - last.ts;
-      // Se o texto recebido for igual ao último enviado pelo bot (ou contiver), e within 8s, ignorar
-      if (age <= 8000) {
+      if (age <= ECHO_TTL_MS) {
         const incoming = String(text || '').trim();
         const sent = String(last.text || '').trim();
         if (incoming === sent || incoming.includes(sent) || sent.includes(incoming)) {
@@ -425,13 +425,7 @@ async function handleWebhook(req, res) {
 
   enqueuePhoneTask(phone, async () => {
     try {
-      const mensagemVazia = text === '' && !isAudio;
-      const ehSaudacao = contemSaudacao(text);
-      if (mensagemVazia || ehSaudacao) {
-        await sendWelcome(phone);
-      } else {
-        await processMessage(phone, text, isAudio, !!parsed.isInteractive);
-      }
+      await handleIncomingMessage(phone, text, isAudio, !!parsed.isInteractive);
     } catch (err) {
       try {
         const { sendMessage } = require('./uazapi');
